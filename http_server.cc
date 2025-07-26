@@ -10,15 +10,23 @@
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
+#include <openssl/ssl.h>
 
 namespace simple_ssl {
 
 template<class T> struct DeleterOf;
 template<> struct DeleterOf<BIO> { void operator()(BIO *p) const { BIO_free_all(p); } };
 template<> struct DeleterOf<BIO_METHOD> { void operator()(BIO_METHOD *p) const { BIO_meth_free(p); } };
+template<> struct DeleterOf<SSL_CTX> { void operator()(SSL_CTX *p) const { SSL_CTX_free(p); } };
 
 template<class OpenSSLType>
 using UniquePtr = std::unique_ptr<OpenSSLType, DeleterOf<OpenSSLType>>;
+
+simple_ssl::UniquePtr<BIO> operator|(simple_ssl::UniquePtr<BIO> lower, simple_ssl::UniquePtr<BIO> upper)
+{
+    BIO_push(upper.get(), lower.release());
+    return upper;
+}
 
 class StringBIO {
     std::string str_;
@@ -137,6 +145,15 @@ simple_ssl::UniquePtr<BIO> accept_new_tcp_connection(BIO *accept_bio)
 
 int main()
 {
+    auto ctx = simple_ssl::UniquePtr<SSL_CTX>(SSL_CTX_new(TLS_method()));
+    SSL_CTX_set_min_proto_version(ctx.get(), TLS1_2_VERSION);
+    if (SSL_CTX_use_certificate_file(ctx.get(), "./certs/server-certificate.pem", SSL_FILETYPE_PEM) <= 0) {
+        simple_ssl::print_errors_and_exit("Error loading server certificate");
+    }
+    if (SSL_CTX_use_PrivateKey_file(ctx.get(), "./certs/server-private-key.pem", SSL_FILETYPE_PEM) <= 0) {
+        simple_ssl::print_errors_and_exit("Error loading server private key");
+    }
+
     auto accept_bio = simple_ssl::UniquePtr<BIO>(BIO_new_accept("8080"));
     if (BIO_do_accept(accept_bio.get()) <= 0) {
         simple_ssl::print_errors_and_exit("Error in BIO_do_accept (binding to port 8080)");
@@ -148,6 +165,7 @@ int main()
     signal(SIGINT, [](int) { shutdown_the_socket(); });
 
     while (auto bio = simple_ssl::accept_new_tcp_connection(accept_bio.get())) {
+        bio = std::move(bio) | simple_ssl::UniquePtr<BIO>(BIO_new_ssl(ctx.get(), 0));
         try {
             std::string request = simple_ssl::receive_http_message(bio.get());
             printf("Got request:\n");
