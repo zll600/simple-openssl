@@ -6,8 +6,10 @@
 #include <vector>
 #include <string>
 
+#include <openssl/ssl.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
+#include <openssl/x509v3.h>
 
 namespace simple_ssl {
 
@@ -22,10 +24,20 @@ template<> struct DeleterOf<BIO_METHOD> {
         BIO_meth_free(method);
     }
 };
+template<> struct DeleterOf<SSL_CTX> {
+    void operator()(SSL_CTX* ctx) const {
+        SSL_CTX_free(ctx);
+    }
+};
 
 template<class OpenSSLType>
 using UniquePtr = std::unique_ptr<OpenSSLType, DeleterOf<OpenSSLType>>;
 
+simple_ssl::UniquePtr<BIO> operator|(simple_ssl::UniquePtr<BIO> lower, simple_ssl::UniquePtr<BIO> upper)
+{
+    BIO_push(upper.get(), lower.release());
+    return upper;
+}
 
 class StringBIO {
  public:
@@ -137,13 +149,45 @@ void send_http_request(BIO *bio, const std::string& line, const std::string& hos
     BIO_flush(bio);
 }
 
+SSL* get_ssl(BIO *bio) {
+    SSL *ssl = nullptr;
+    BIO_get_ssl(bio, &ssl);
+    if (ssl == nullptr) {
+        simple_ssl::print_errors_and_exit("Error in BIO_get_ssl");
+    }
+    return ssl;
+}
+
+void verify_the_certificate(SSL *ssl, const std::string& expected_hostname) {
+    int err = SSL_get_verify_result(ssl);
+    if (err != X509_V_OK) {
+        const char *msg = X509_verify_cert_error_string(err);
+        fprintf(stderr, "Certificate verification error: %s (%d)\n", msg, err);
+        exit(EXIT_FAILURE);
+    }
+    X509 *cert = SSL_get_peer_certificate(ssl);
+    if (cert == nullptr) {
+        simple_ssl::print_errors_and_exit("No certificate presented by the server");
+        exit(EXIT_FAILURE);
+    }
+
+    
+    if (X509_check_host(cert, expected_hostname.data(), expected_hostname.size(), 0, nullptr) != 1) {
+        fprintf(stderr, "Certificate verification error: Hostname mismatch for %s\n", expected_hostname.c_str());
+        exit(EXIT_FAILURE);
+    }
+}
+
 } // namespace simple_ssl
 
-
-
-
 int main() {
-    auto bio = simple_ssl::UniquePtr<BIO>(BIO_new_connect("localhost:8080"));
+    auto ctx = simple_ssl::UniquePtr<SSL_CTX>(SSL_CTX_new(TLS_client_method()));
+    SSL_CTX_set_min_proto_version(ctx.get(), TLS1_2_VERSION);
+    if (SSL_CTX_set_default_verify_paths(ctx.get()) != 1) {
+        simple_ssl::print_errors_and_exit("Error loading trust store");
+    }
+
+    auto bio = simple_ssl::UniquePtr<BIO>(BIO_new_connect("duckduckgo.com:443"));
     if (bio == nullptr) {
         simple_ssl::print_errors_and_exit("Error in BIO_new_connect");
     }
@@ -152,8 +196,15 @@ int main() {
         simple_ssl::print_errors_and_exit("Error in BIO_do_connect");
     }
 
-    simple_ssl::send_http_request(bio.get(), "GET / HTTP/1.1", "duckduckgo.com");
-    std::string response = simple_ssl::receive_http_response(bio.get());
+    auto ssl_bio = std::move(bio) | simple_ssl::UniquePtr<BIO>(BIO_new_ssl(ctx.get(), 1));
+    SSL_set_tlsext_host_name(simple_ssl::get_ssl(ssl_bio.get()), "duckduckgo.com");
+    if (BIO_do_handshake(ssl_bio.get()) <= 0) {
+        simple_ssl::print_errors_and_exit("Error in TLS handshake");
+    }
+    simple_ssl::verify_the_certificate(simple_ssl::get_ssl(ssl_bio.get()), "duckduckgo.com");
+    
+    simple_ssl::send_http_request(ssl_bio.get(), "GET / HTTP/1.1", "duckduckgo.com");
+    std::string response = simple_ssl::receive_http_response(ssl_bio.get());
     printf("%s", response.c_str());
 
     return 0;
