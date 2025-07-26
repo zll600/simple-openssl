@@ -143,7 +143,7 @@ void send_http_request(BIO *bio, const std::string& line, const std::string& hos
 
 
 int main() {
-    auto bio = simple_ssl::UniquePtr<BIO>(BIO_new_connect("duckduckgo.com:80"));
+    auto bio = simple_ssl::UniquePtr<BIO>(BIO_new_connect("localhost:8080"));
     if (bio == nullptr) {
         simple_ssl::print_errors_and_exit("Error in BIO_new_connect");
     }
