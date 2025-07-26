@@ -145,6 +145,17 @@ simple_ssl::UniquePtr<BIO> accept_new_tcp_connection(BIO *accept_bio)
 
 int main()
 {
+    auto proxy_ctx = simple_ssl::UniquePtr<SSL_CTX>(SSL_CTX_new(TLS_method()));
+    SSL_CTX_set_min_proto_version(proxy_ctx.get(), TLS1_2_VERSION);
+    SSL_CTX_use_certificate_file(proxy_ctx.get(), "./certs/proxy-certificate.pem", SSL_FILETYPE_PEM);
+    SSL_CTX_use_PrivateKey_file(proxy_ctx.get(), "./certs/proxy-private-key.pem", SSL_FILETYPE_PEM);
+
+    auto inner_ctx = simple_ssl::UniquePtr<SSL_CTX>(SSL_CTX_new(TLS_method()));
+    SSL_CTX_set_min_proto_version(inner_ctx.get(), TLS1_2_VERSION);
+    SSL_CTX_use_certificate_file(inner_ctx.get(), "./certs/inner-certificate.pem", SSL_FILETYPE_PEM);
+    SSL_CTX_use_PrivateKey_file(inner_ctx.get(), "./certs/inner-private-key.pem", SSL_FILETYPE_PEM);
+
+
     auto ctx = simple_ssl::UniquePtr<SSL_CTX>(SSL_CTX_new(TLS_method()));
     SSL_CTX_set_min_proto_version(ctx.get(), TLS1_2_VERSION);
     if (SSL_CTX_use_certificate_file(ctx.get(), "./certs/server-certificate.pem", SSL_FILETYPE_PEM) <= 0) {
@@ -165,9 +176,19 @@ int main()
     signal(SIGINT, [](int) { shutdown_the_socket(); });
 
     while (auto bio = simple_ssl::accept_new_tcp_connection(accept_bio.get())) {
-        bio = std::move(bio) | simple_ssl::UniquePtr<BIO>(BIO_new_ssl(ctx.get(), 0));
+        bio = std::move(bio) | simple_ssl::UniquePtr<BIO>(BIO_new_ssl(proxy_ctx.get(), 0));
+
         try {
             std::string request = simple_ssl::receive_http_message(bio.get());
+            printf("Got request:\n");
+            printf("%s\n", request.c_str());
+            std::string response = "HTTP/1.1 200 Connection established\r\n\r\n";
+            BIO_write(bio.get(), response.data(), response.size());
+
+            bio = std::move(bio)
+                | simple_ssl::UniquePtr<BIO>(BIO_new_ssl(inner_ctx.get(), 0))
+                ;
+            request = simple_ssl::receive_http_message(bio.get());
             printf("Got request:\n");
             printf("%s\n", request.c_str());
             simple_ssl::send_http_response(bio.get(), "okay cool\n");

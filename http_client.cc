@@ -178,33 +178,55 @@ void verify_the_certificate(SSL *ssl, const std::string& expected_hostname) {
     }
 }
 
+std::string to_pem(X509 *cert) {
+    StringBIO bio;
+    PEM_write_bio_X509(bio.bio(), cert);
+    return std::move(bio).str();
+}
+
 } // namespace simple_ssl
 
 int main() {
-    auto ctx = simple_ssl::UniquePtr<SSL_CTX>(SSL_CTX_new(TLS_client_method()));
-    SSL_CTX_set_min_proto_version(ctx.get(), TLS1_2_VERSION);
-    if (SSL_CTX_set_default_verify_paths(ctx.get()) != 1) {
-        simple_ssl::print_errors_and_exit("Error loading trust store");
+    auto proxy_ctx = simple_ssl::UniquePtr<SSL_CTX>(SSL_CTX_new(TLS_client_method()));
+    if (SSL_CTX_set_default_verify_paths(proxy_ctx.get()) != 1) {
+        simple_ssl::print_errors_and_exit("Error setting up trust store");
     }
-
-    auto bio = simple_ssl::UniquePtr<BIO>(BIO_new_connect("duckduckgo.com:443"));
+    
+    auto bio = simple_ssl::UniquePtr<BIO>(BIO_new_connect("rtsd.mi.th:443"));
     if (bio == nullptr) {
         simple_ssl::print_errors_and_exit("Error in BIO_new_connect");
     }
-
     if (BIO_do_connect(bio.get()) <= 0) {
         simple_ssl::print_errors_and_exit("Error in BIO_do_connect");
     }
-
-    auto ssl_bio = std::move(bio) | simple_ssl::UniquePtr<BIO>(BIO_new_ssl(ctx.get(), 1));
-    SSL_set_tlsext_host_name(simple_ssl::get_ssl(ssl_bio.get()), "duckduckgo.com");
+    auto ssl_bio = std::move(bio) | simple_ssl::UniquePtr<BIO>(BIO_new_ssl(proxy_ctx.get(), 1));
+    SSL_set_tlsext_host_name(simple_ssl::get_ssl(ssl_bio.get()), "rtsd.mi.th");
+    SSL_set1_host(simple_ssl::get_ssl(ssl_bio.get()), "rtsd.mi.th");
     if (BIO_do_handshake(ssl_bio.get()) <= 0) {
-        simple_ssl::print_errors_and_exit("Error in TLS handshake");
+        simple_ssl::print_errors_and_exit("Error in BIO_do_handshake");
     }
-    simple_ssl::verify_the_certificate(simple_ssl::get_ssl(ssl_bio.get()), "duckduckgo.com");
-    
-    simple_ssl::send_http_request(ssl_bio.get(), "GET / HTTP/1.1", "duckduckgo.com");
+    simple_ssl::verify_the_certificate(simple_ssl::get_ssl(ssl_bio.get()), "rtsd.mi.th");
+
+    simple_ssl::send_http_request(ssl_bio.get(), "CONNECT api.ipify.org:443 HTTP/1.1", "rtsd.mi.th");
     std::string response = simple_ssl::receive_http_response(ssl_bio.get());
+    printf("%s\n", response.c_str());
+
+    auto inner_ctx = simple_ssl::UniquePtr<SSL_CTX>(SSL_CTX_new(TLS_client_method()));
+    SSL_CTX_set_min_proto_version(inner_ctx.get(), TLS1_2_VERSION);
+    if (SSL_CTX_set_default_verify_paths(inner_ctx.get()) != 1) {
+        simple_ssl::print_errors_and_exit("Error loading trust store");
+    }
+
+    auto inner_bio = std::move(ssl_bio) | simple_ssl::UniquePtr<BIO>(BIO_new_ssl(inner_ctx.get(), 1));
+    SSL_set_tlsext_host_name(simple_ssl::get_ssl(ssl_bio.get()), "api.ipify.org");
+    SSL_set1_host(simple_ssl::get_ssl(inner_bio.get()), "api.ipify.org");
+    if (BIO_do_handshake(ssl_bio.get()) <= 0) {
+        simple_ssl::print_errors_and_exit("Error in BIO_do_handshake");
+    }
+    simple_ssl::verify_the_certificate(simple_ssl::get_ssl(ssl_bio.get()), "api.ipify.org");
+    
+    simple_ssl::send_http_request(inner_bio.get(), "GET /?format=json HTTP/1.1", "api.ipify.org");
+    response = simple_ssl::receive_http_response(ssl_bio.get());
     printf("%s", response.c_str());
 
     return 0;
